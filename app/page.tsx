@@ -34,6 +34,199 @@ const explanations: Record<number, Omit<Line, 'no' | 'code'>> = {
   11: { label: 'Return an explainable result', explain: 'Return both the suggested category and its total minutes. The caller can show the recommendation and the evidence behind it.', why: 'Returning the reason makes the output inspectable instead of a black box.', risk: 'If the caller only displays suggestion, the evidence is lost from the interface.', question: 'Where would this result be displayed?' },
 }
 
+type FeatureInsight = { tag: string; subject: string; summary: string; data: string; states: string; edges: string; designer: { question: string; points: string[] }; engineer: { question: string; points: string[] }; handoff: string }
+
+const STOPWORDS = new Set(['a','an','the','my','their','his','her','its','our','your','to','of','for','from','on','with','that','which','so','and','let','users','user','people','person','someone','a user','allow','enable'])
+
+function extractSubject(text: string): string {
+  const patterns = [
+    /(?:delete|remove|archive|discard|save|unsave|favorite|bookmark|like|unlike|edit|update|rename|change|upload|attach|share|unshare|invite|schedule|book|reserve|cancel|search|filter|find|sort|comment on|message|reply to|notify|remind|pay for|checkout|subscribe to|log in to|sign up for|sign into|view|open|create|add|remove from)\s+(?:(?:their|the|an|a|his|her|its|our|your|my)\b\s*)?([a-z][a-z0-9'\- ]{1,40}?)(?:\s+(?:from|in|to|for|on|with|that|which|so|and|when|while|before|after)\b|[.,!?]|$)/i,
+  ]
+  for (const pattern of patterns) {
+    const match = text.match(pattern)
+    if (match?.[1]) {
+      const cleaned = match[1].trim().replace(/\s+/g, ' ')
+      if (cleaned.length > 1) return cleaned
+    }
+  }
+  const words = text.replace(/[.,!?]/g, '').split(/\s+/).filter(w => w && !STOPWORDS.has(w.toLowerCase()))
+  const tail = words.slice(-3).join(' ')
+  return tail || text.trim() || 'this feature'
+}
+
+function detectModifiers(text: string) {
+  const lower = text.toLowerCase()
+  return {
+    multiUser: /\bteam\b|everyone|shared with|collaborat|multiple (people|users)|together/.test(lower),
+    offline: /offline|no connection|slow (network|connection)|poor signal|flaky/.test(lower),
+    realtime: /real.?time|instant(ly)?|live update|sync(hronize)?/.test(lower),
+    permissioned: /\badmin\b|owner only|permission|role|private|restricted|only (i|they) can/.test(lower),
+    mobile: /\bmobile\b|\bphone\b|on the go|small screen/.test(lower),
+    scale: /thousands|large (list|number|amount)|many (items|users|people)|at scale/.test(lower),
+    public: /\bpublic\b|anyone (can|with)|external (user|visitor)/.test(lower),
+  }
+}
+
+function modifierBullets(mods: ReturnType<typeof detectModifiers>, subject: string) {
+  const designer: string[] = []
+  const engineer: string[] = []
+  if (mods.multiUser) { designer.push(`Show whose change to "${subject}" is currently active when more than one person is looking at it.`); engineer.push(`Decide how conflicting updates to "${subject}" from different people are resolved, not just detected.`) }
+  if (mods.offline) { designer.push(`Design what "${subject}" looks like the moment connectivity drops mid-action.`); engineer.push(`Queue the action on "${subject}" locally and reconcile it once the connection returns.`) }
+  if (mods.realtime) { designer.push(`Make updates to "${subject}" feel instant without a manual refresh.`); engineer.push(`Push changes to "${subject}" over a live channel instead of polling, and handle a dropped connection.`) }
+  if (mods.permissioned) { designer.push(`Make it obvious who is currently allowed to act on "${subject}" before they try.`); engineer.push(`Enforce who can act on "${subject}" on the server, not just by hiding the button.`) }
+  if (mods.mobile) { designer.push(`Design the "${subject}" action for a thumb-sized target and a spotty connection.`); engineer.push(`Keep the payload for "${subject}" small and the request tolerant of a slow mobile network.`) }
+  if (mods.scale) { designer.push(`Decide how "${subject}" behaves when the list behind it has thousands of entries, not ten.`); engineer.push(`Paginate or index "${subject}" — an operation that scans everything will not survive real data volume.`) }
+  if (mods.public) { designer.push(`Be explicit about what a stranger can and cannot do with "${subject}".`); engineer.push(`Treat any request touching "${subject}" from an anonymous or external caller as untrusted input.`) }
+  return { designer, engineer }
+}
+
+function analyzeFeature(brief: string): FeatureInsight {
+  const name = brief.trim() || 'this feature'
+  const text = name.toLowerCase()
+  const subject = extractSubject(name)
+  const mods = detectModifiers(name)
+  const tag = /delete|remove|archive|discard/.test(text) ? 'delete'
+    : /invite|invit|team member|collaborat/.test(text) ? 'invite'
+    : /upload|attach|photo|image|\bfile/.test(text) ? 'upload'
+    : /pay|checkout|subscription|billing|price|cart/.test(text) ? 'payment'
+    : /search|filter|sort|find/.test(text) ? 'search'
+    : /comment|chat|message|reply/.test(text) ? 'messaging'
+    : /notify|notification|alert|remind/.test(text) ? 'notification'
+    : /login|sign in|signup|sign up|password|\bauth/.test(text) ? 'auth'
+    : /share|permission|access|visib|public|private/.test(text) ? 'sharing'
+    : /save|favorite|bookmark|\blike\b/.test(text) ? 'save'
+    : /edit|update|rename|change/.test(text) ? 'edit'
+    : /schedule|calendar|book|reserve|appointment/.test(text) ? 'scheduling'
+    : 'generic'
+  const library: Record<string, Omit<FeatureInsight, 'subject'>> = {
+    delete: {
+      tag, summary: `Removing ${subject} is a one-way door for the user; "${name}" needs a safety net before it needs a button.`,
+      data: `A soft-delete flag and a deleted_at timestamp on ${subject} — not a hard row delete.`,
+      states: `Idle → confirming ${subject} → deleting → undo window → gone.`,
+      edges: `Deleting the last ${subject}, deleting it mid-edit, and double-tapping delete on a slow connection.`,
+      designer: { question: `Can the person recover from deleting ${subject}?`, points: [`Show a confirm step only when removing ${subject} is destructive and hard to reverse.`, `Give a short undo window (a toast with "Undo") after removing ${subject}, instead of a modal for low-risk deletes.`, `Design the empty state that appears right after the last ${subject} is removed.`] },
+      engineer: { question: `What actually happens to ${subject} in the database?`, points: [`Soft-delete ${subject} first; hard-delete on a delayed job so undo stays possible.`, `Check what else references ${subject}, and whether it also disappears.`, `Make the request to delete ${subject} idempotent so a retried tap cannot double-fire.`] },
+      handoff: `Write one acceptance example: "When I delete the last ${subject} in ${name}, I see an empty state, not an error."`,
+    },
+    invite: {
+      tag, summary: `Invites to ${subject} live between two accounts that do not trust each other yet — most of the hard part of "${name}" happens before acceptance.`,
+      data: `An invite record for ${subject} with status (pending / accepted / expired), a token, and an expiry time — separate from the membership row it becomes.`,
+      states: `Sent → pending → accepted / declined / expired for ${subject}.`,
+      edges: `Inviting someone already invited to ${subject}, an expired link, and an invite to an email that already has an account.`,
+      designer: { question: `What does a pending invite to ${subject} look like to everyone involved?`, points: [`Show pending invites to ${subject} as their own list state, not mixed in with active members.`, `Let the inviter resend or revoke access to ${subject} without leaving the page.`, `Design what the invitee sees when their link to ${subject} is expired or already used.`] },
+      engineer: { question: `What guarantees does the token for ${subject} need?`, points: [`Expire the token for ${subject} server-side, not just by hiding it in the UI.`, `Make accepting an invite to ${subject} idempotent if the link is opened twice.`, `Decide what happens if the email invited to ${subject} already has an account.`] },
+      handoff: `Write one acceptance example: "When an invite to ${subject} in ${name} expires, resending creates a new token, not a reused one."`,
+    },
+    upload: {
+      tag, summary: `"${name}" hands the user's ${subject} to a system that can fail in the middle — the interface has to narrate that.`,
+      data: `File URL, size, mime type, owner id, and an upload status for ${subject} — not one "done" flag for the batch.`,
+      states: `Selected → uploading ${subject} (progress) → processing → ready / failed.`,
+      edges: `A ${subject} that is too large, an unsupported type, and a connection that drops mid-upload.`,
+      designer: { question: `How does uploading ${subject} feel, not just look?`, points: [`Show per-file progress for ${subject}, not one spinner for a whole batch.`, `Design the retry path for a failed upload of ${subject} without losing the other files.`, `Say exactly why ${subject} was rejected — size, type, or count.`] },
+      engineer: { question: `What constraints does the server enforce on ${subject}?`, points: [`Validate the size and mime type of ${subject} server-side, not just in the file picker.`, `Decide if uploading ${subject} is chunked and resumable, or one shot.`, `Define what "ready" means for ${subject}: uploaded, or processed and safe to display?`] },
+      handoff: `Write one acceptance example: "When a ${subject} over the size limit is dropped into ${name}, the person sees why before the upload starts."`,
+    },
+    payment: {
+      tag, summary: `Money makes every ambiguity expensive — "${name}" needs the same total for ${subject} shown to the user and charged by the server.`,
+      data: `Amount, currency, an idempotency key per attempt, and a status (pending / succeeded / failed / refunded) for ${subject}.`,
+      states: `Reviewing ${subject} → submitting → succeeded / declined / needs action.`,
+      edges: `A double-submitted charge for ${subject}, a declined card mid-flow, and a webhook that arrives before the redirect.`,
+      designer: { question: `How does the person recover from a decline on ${subject}?`, points: [`Show the decline reason for ${subject} in plain language, not a raw processor code.`, `Keep the entered details for ${subject} when a payment fails so nothing is retyped.`, `Make the "processing" state for ${subject} impossible to double-tap through.`] },
+      engineer: { question: `What must never happen twice for ${subject}?`, points: [`Use an idempotency key for ${subject} so a retried request cannot double-charge.`, `Treat the webhook, not the redirect, as the source of truth for ${subject} succeeding.`, `Recompute the total for ${subject} server-side — never trust a client-sent amount.`] },
+      handoff: `Write one acceptance example: "When payment for ${subject} in ${name} is submitted twice in a row, only one charge is created."`,
+    },
+    search: {
+      tag, summary: `"${name}" is judged by its empty and slow states on ${subject} far more than by a perfect match.`,
+      data: `A query string, applied filters, and a result set of ${subject} with a total count and a next-page cursor.`,
+      states: `Idle → typing (debounced) → loading → ${subject} results / zero results / error.`,
+      edges: `Zero results for ${subject}, a query that returns thousands of rows, and a filter combination with no matches.`,
+      designer: { question: `What does "no ${subject} found" actually say?`, points: [`Design a zero-results state for ${subject} that suggests a next action, not just "no results".`, `Show a loading state for ${subject} that does not flash for fast queries.`, `Decide how active filters on ${subject} stay visible while scrolling results.`] },
+      engineer: { question: `What keeps searching ${subject} fast at scale?`, points: [`Debounce the request for ${subject}, and cancel the stale one when a new query starts.`, `Paginate or virtualize ${subject} — never return an unbounded result set.`, `Decide whether searching ${subject} runs client-side or needs a real index.`] },
+      handoff: `Write one acceptance example: "When searching ${subject} in ${name} returns zero results, the person sees a next step, not a dead end."`,
+    },
+    messaging: {
+      tag, summary: `"${name}" has to make ${subject} feel instant even though the network is not — ordering and delivery become the real design problem.`,
+      data: `Message text, sender id, a client-generated id (for dedup), a timestamp, and a delivery status for ${subject}.`,
+      states: `Composing ${subject} → sending (optimistic) → delivered / failed → read.`,
+      edges: `Two instances of ${subject} arriving out of order, one sent while offline, and the same ${subject} sent twice.`,
+      designer: { question: `What does "sending" ${subject} look like before the server confirms?`, points: [`Show ${subject} optimistically, then reconcile or roll it back.`, `Design a clear failed-to-send state for ${subject} with a retry, not a silent drop.`, `Decide how read receipts or typing indicators for ${subject} degrade offline.`] },
+      engineer: { question: `What guarantees ordering and no duplicates for ${subject}?`, points: [`Use a client-generated id for ${subject} so a retried send is deduplicated, not doubled.`, `Order ${subject} by server timestamp, not client clock.`, `Decide the reconnect behavior for ${subject}: replay missed messages, or just the latest.`] },
+      handoff: `Write one acceptance example: "When ${subject} in ${name} is sent offline, it appears once, correctly ordered, after reconnect."`,
+    },
+    notification: {
+      tag, summary: `"${name}" makes ${subject} compete for attention it has not earned yet — most of the design work is deciding when to stay silent.`,
+      data: `A notification type, target user, read/unread state, and a delivery channel (push / email / in-app) for ${subject}.`,
+      states: `Triggered → queued → delivered → read / dismissed for ${subject}.`,
+      edges: `The same ${subject} event firing twice, a user muting that channel, and a burst of ${subject} events needing grouping.`,
+      designer: { question: `When does ${subject} deserve interrupting someone?`, points: [`Group repeated ${subject} events instead of sending one notification per event.`, `Design what read vs. unread looks like for ${subject} across every channel.`, `Give a clear, specific mute or preference control for ${subject}, not an all-or-nothing switch.`] },
+      engineer: { question: `What stops duplicate or lost notifications for ${subject}?`, points: [`Deduplicate ${subject} on the triggering event id, not on a timer.`, `Decide the delivery guarantee for ${subject}: at-least-once with dedup, or best effort.`, `Respect user channel preferences server-side before sending ${subject}.`] },
+      handoff: `Write one acceptance example: "When the same ${subject} event fires twice in ${name}, only one notification is delivered."`,
+    },
+    auth: {
+      tag, summary: `"${name}" is the one flow where a confusing error on ${subject} becomes a security question, not just a UX one.`,
+      data: `A hashed credential, session token, failed-attempt count, and lockout/reset state for ${subject} — never a plaintext password.`,
+      states: `Entering ${subject} → checking → success / invalid credentials / locked / needs verification.`,
+      edges: `Repeated failed attempts at ${subject}, an expired session mid-action, and a reset link opened twice.`,
+      designer: { question: `What does the person learn from an error on ${subject}?`, points: [`Give one honest error for wrong credentials on ${subject} without confirming which field was wrong.`, `Design the locked-out state for ${subject} with a clear, safe way forward.`, `Show a session expiring mid-${subject} as a recoverable moment, not a lost form.`] },
+      engineer: { question: `What is the system guaranteeing about identity for ${subject}?`, points: [`Rate-limit and lock ${subject} after repeated failures, tracked server-side.`, `Hash and salt any credential behind ${subject}; never log or return it.`, `Expire and rotate reset tokens for ${subject} after first use.`] },
+      handoff: `Write one acceptance example: "When ${subject} in ${name} is attempted with the wrong password five times, the account is temporarily locked."`,
+    },
+    sharing: {
+      tag, summary: `"${name}" means two people can now disagree about who is allowed to see ${subject} — that disagreement needs a visible answer.`,
+      data: `A permission level per user or link (view / edit / owner) on ${subject}, and whether access is scoped to a person or anyone with the link.`,
+      states: `Private → shared (pending / active) → access changed → revoked for ${subject}.`,
+      edges: `Revoking access to ${subject} someone is actively using, a link to it shared further than intended, and two editors of ${subject} at once.`,
+      designer: { question: `Can everyone tell who can see ${subject}?`, points: [`Always show the current access level on ${subject} somewhere visible, not buried in settings.`, `Design what happens to ${subject} the moment access is revoked mid-session.`, `Make link-based sharing of ${subject} visually distinct from person-based sharing.`] },
+      engineer: { question: `What enforces the permission on ${subject}, not just displays it?`, points: [`Check permission on ${subject} on every read and write server-side, not only in the UI.`, `Decide what happens to an active session on ${subject} when access is revoked.`, `Scope shareable links to ${subject} with their own revocable token, not the owner's.`] },
+      handoff: `Write one acceptance example: "When access to ${subject} in ${name} is revoked, the next request from that user is denied, not just hidden."`,
+    },
+    save: {
+      tag, summary: `"${name}" looks trivial until two devices disagree about whether ${subject} was saved.`,
+      data: `A saved/favorited flag or join row for ${subject} per user, with the timestamp it happened.`,
+      states: `Unsaved → saving ${subject} (optimistic) → saved → removed.`,
+      edges: `Saving the same ${subject} twice, saving it while offline, and unsaving mid-request.`,
+      designer: { question: `How does the ${subject} toggle feel instantly?`, points: [`Update the ${subject} toggle optimistically on tap; reconcile silently if the request fails.`, `Design where saved ${subject} lives and how someone finds it again.`, `Decide how the failed-save state for ${subject} looks without feeling broken.`] },
+      engineer: { question: `What keeps saving ${subject} idempotent?`, points: [`Make saving ${subject} twice a no-op, not a duplicate row.`, `Decide if the saved state of ${subject} syncs across devices in real time or on refresh.`, `Handle the race between rapid save/unsave taps on ${subject}.`] },
+      handoff: `Write one acceptance example: "When ${subject} in ${name} is tapped twice quickly, exactly one saved state results."`,
+    },
+    edit: {
+      tag, summary: `"${name}" introduces a second writer to ${subject} that used to have one — conflicts are now possible, not hypothetical.`,
+      data: `The field of ${subject} being changed, a version or updated_at value, and who made the last change.`,
+      states: `Viewing ${subject} → editing → saving → saved / conflict / discarded.`,
+      edges: `Two people editing the same ${subject}, closing the tab mid-edit, and editing a stale copy of ${subject}.`,
+      designer: { question: `What happens when someone else changed ${subject} first?`, points: [`Show unsaved changes to ${subject} clearly so nothing is lost by navigating away.`, `Design a real conflict state for ${subject}, not a silent overwrite.`, `Confirm a save to ${subject} succeeded without forcing an extra click.`] },
+      engineer: { question: `What decides whose edit to ${subject} wins?`, points: [`Use a version check on ${subject} so a stale save is rejected or merged, not overwritten silently.`, `Autosave or explicit save for ${subject} — pick one, and make failure states match.`, `Decide what "who last edited" means for ${subject} when edits overlap.`] },
+      handoff: `Write one acceptance example: "When two people edit ${subject} in ${name} at once, the second save is warned, not silently lost."`,
+    },
+    scheduling: {
+      tag, summary: `"${name}" is really a negotiation over a shared resource: time for ${subject} — most bugs live in double-booking, not the calendar UI.`,
+      data: `A start/end time with timezone, an owner, and a status (tentative / confirmed / cancelled) for ${subject}.`,
+      states: `Choosing a time for ${subject} → holding it → confirmed → rescheduled / cancelled.`,
+      edges: `Two people booking the same ${subject} slot, a timezone mismatch, and a cancellation after confirmation.`,
+      designer: { question: `How does the person know their ${subject} slot is really theirs?`, points: [`Show ${subject} as "held" the moment a slot is picked, before final confirmation.`, `Always display the timezone being used for ${subject}, not just a bare time.`, `Design the cancellation and reschedule flow for ${subject} with the same care as booking.`] },
+      engineer: { question: `What prevents two bookings for one ${subject} slot?`, points: [`Lock or check availability for ${subject} atomically at confirmation, not just at page load.`, `Store times for ${subject} in UTC and convert for display — never store local time.`, `Decide the hold duration before an unconfirmed ${subject} slot releases back.`] },
+      handoff: `Write one acceptance example: "When two people try to book the same ${subject} slot in ${name}, only the first confirmation succeeds."`,
+    },
+    generic: {
+      tag, summary: `"${name}" is still a phrase, not a spec — the fastest way to sharpen it is to pick the first real action on ${subject}.`,
+      data: `Name the one thing ${subject} creates, reads, or changes after a refresh — what is the noun here?`,
+      states: `Before acting on ${subject}, during it, right after success, and after it fails.`,
+      edges: `Empty input for ${subject}, a slow network, and the same action on ${subject} fired twice.`,
+      designer: { question: `What should the person feel right after acting on ${subject}?`, points: [`Sketch what ${subject} looks like with zero data, not just the happy path.`, `Decide what confirms the action on ${subject} worked without forcing an extra click.`, `Write the one error message that would actually help someone recover ${subject}.`] },
+      engineer: { question: `What does the system have to promise about ${subject}?`, points: [`Name the data ${subject} needs to persist, and where it lives after a refresh.`, `Decide what happens if the request behind ${subject} is sent twice.`, `Decide who owns validation for ${subject}: the form, the API, or both.`] },
+      handoff: `Turn "${name}" into one sentence an engineer can test: "When ___ happens to ${subject}, the system should ___."`,
+    },
+  }
+  const base = library[tag]
+  const extra = modifierBullets(mods, subject)
+  return {
+    ...base,
+    subject,
+    designer: { question: base.designer.question, points: [...base.designer.points, ...extra.designer] },
+    engineer: { question: base.engineer.question, points: [...base.engineer.points, ...extra.engineer] },
+  }
+}
+
 export default function Page() {
   const [code, setCode] = useState(sampleCode)
   const [selectedLine, setSelectedLine] = useState(8)
@@ -44,17 +237,12 @@ export default function Page() {
   const [strokes, setStrokes] = useState<Stroke[]>([])
   const [drawingStroke, setDrawingStroke] = useState<Stroke | null>(null)
   const [featureBrief, setFeatureBrief] = useState('Save a favorite from a list')
-  const [playMode, setPlayMode] = useState<'story' | 'trace' | 'change' | 'break'>('story')
-  const [isRunning, setIsRunning] = useState(false)
-  const [playResult, setPlayResult] = useState('')
-  const [goal, setGoal] = useState<'story' | 'trace' | 'ui' | 'change' | 'break' | 'mechanics'>('story')
+ 
   const [feedback, setFeedback] = useState<'unreviewed' | 'approved' | 'corrected' | 'rejected'>('unreviewed')
   const [modelInput, setModelInput] = useState('[{"category":"Work","minutes":45},{"category":"Health","minutes":20}]')
   const [modelOutput, setModelOutput] = useState('Select Analyze to generate a walkthrough from the code you pasted.')
   const [isModelRunning, setIsModelRunning] = useState(false)
-  const [activeStep, setActiveStep] = useState(0)
-  const [isPlaying, setIsPlaying] = useState(false)
-  const [contextAction, setContextAction] = useState<'why' | 'break' | 'change' | null>(null)
+
   const [runResult, setRunResult] = useState<{ suggestion: string; reason: number } | null>(null)
   const [runError, setRunError] = useState('')
   const [marks, setMarks] = useState<Mark[]>([])
@@ -64,6 +252,7 @@ export default function Page() {
   const [pointing, setPointing] = useState(false)
   const [pointReady, setPointReady] = useState(false)
   const [pointStart, setPointStart] = useState<number | null>(null)
+  const [drawOverlay, setDrawOverlay] = useState<{ x: number; y: number } | null>(null)
   const lines = useMemo(() => code.split('\n'), [code])
   function inferDetail(no: number): Omit<Line, 'no' | 'code'> {
     const text = (lines[no - 1] || '').trim()
@@ -91,17 +280,16 @@ export default function Page() {
   const hasUserInput = modelInput.trim().length > 0
   const inputContract = useMemo(() => { const param = code.match(/function\s+\w+\s*\(([^)]*)\)|\(([^)]*)\)\s*=>/)?.[1] || code.match(/function\s+\w+\s*\(([^)]*)\)|\(([^)]*)\)\s*=>/)?.[2] || 'input'; const objectKeys = [...code.matchAll(/\b(\w+)\s*:/g)].map(m=>m[1]).slice(0,4); const collectionKeys = /\w+\[\w+\.(\w+)\]/g; const accessedKeys = [...code.matchAll(collectionKeys)].map(m=>m[1]); const itemKeys = [...code.matchAll(/\bitem\.(\w+)/g)].map(m=>m[1]); const keys = itemKeys.length ? [...new Set([...accessedKeys, ...itemKeys])] : accessedKeys.length ? [...new Set(accessedKeys)] : objectKeys; const example = /reduce|map|filter|sort/.test(code) ? `[${keys.length ? `{${keys.map(key=>`"${key}": ${/minutes|count|size|age|price|total/i.test(key) ? '1' : '"example"'}`).join(', ')}}` : '"example"'}]` : keys.length ? `{${keys.map(key=>`"${key}": ${/minutes|count|size|age|price|total/i.test(key) ? '1' : '"example"'}`).join(', ')}}` : /fetch|axios|http/.test(code) ? '{"query":"example"}' : /if|switch|\?/.test(code) ? 'true' : '"example"'; const shape = /reduce|map|filter|sort/.test(code) ? `a list of items with ${keys.join(', ') || 'the fields this code reads'}` : keys.length ? `a value with ${keys.join(', ')} so this code can read those fields` : 'the value passed into this code'; return { name: param.trim(), shape, example } }, [code])
   useEffect(() => { setModelInput(inputContract.example); setRunResult(null); setRunError(''); setModelOutput(`Edit ${inputContract.name}, then run it to see the result.`) }, [code])
-  const goalLabels = [['story','Show the story'],['trace','Trace the data'],['ui','Connect it to the UI'],['change','Help me change it'],['break','Show what can break'],['mechanics','Show exact mechanics']] as const
-  const goalResult = goal === 'story' ? `This ${codeKind.toLowerCase()} takes ${modelSteps[0]}, performs ${modelSteps[1]}, and produces ${modelSteps[modelSteps.length - 1]}.` : goal === 'trace' ? `The selected lines are the hand-off between ${modelSteps[0]} and ${modelSteps[1]}. Run the walkthrough to see the active step move.` : goal === 'ui' ? `The output from this ${codeKind.toLowerCase()} becomes the user-facing result at “${modelSteps[modelSteps.length - 1]}”.` : goal === 'change' ? `Change the input below, run it, and compare the output. No input is invented for you.` : goal === 'break' ? `Test the risks suggested by this code: empty input, unexpected shape, repeated action, or a failed dependency.` : `${detail.label} is line ${selectedLine}: inspect its input, operation, output, and side effects.`
-  const modelResult = hasUserInput ? modelOutput : goalResult
-  const featureName = featureBrief.trim() || 'your feature'
+  const modelResult = hasUserInput ? modelOutput : `${detail.label} is line ${selectedLine}. Edit the input below and press Run to see the real returned value.`
+  const featureName = featureBrief.trim() || 'this feature'
+  const insight = useMemo(() => analyzeFeature(featureBrief), [featureBrief])
   const collaborationMap = useMemo(() => [
-    { key: 'intent', label: 'Design intent', value: featureName, detail: `What should a person accomplish with ${featureName}?` },
-    { key: 'data', label: 'Data to share', value: 'What must be saved?', detail: `Decide what ${featureName} creates, reads, and needs after refresh.` },
-    { key: 'states', label: 'UI states', value: 'Loading · success · failure', detail: `Define what the interface shows before, during, after, and when ${featureName} fails.` },
-    { key: 'edges', label: 'Edge cases', value: 'Empty · duplicate · offline', detail: `Test the cases that could make ${featureName} confusing or unsafe.` },
-    { key: 'handoff', label: 'Handoff', value: 'One testable decision', detail: `Write one acceptance example an engineer and designer can review together.` },
-  ], [featureName])
+    { key: 'intent', label: 'Design intent', value: featureName, detail: insight.summary },
+    { key: 'data', label: 'Data to share', value: insight.data.split(/[.,—]/)[0], detail: insight.data },
+    { key: 'states', label: 'UI states', value: insight.states.split('→')[0].trim(), detail: insight.states },
+    { key: 'edges', label: 'Edge cases', value: insight.edges.split(',')[0], detail: insight.edges },
+    { key: 'handoff', label: 'Handoff', value: 'One testable decision', detail: insight.handoff },
+  ], [featureName, insight])
   const [selectedConcern, setSelectedConcern] = useState('intent')
   const selectedConcernData = collaborationMap.find(item => item.key === selectedConcern) || collaborationMap[0]
   const codeQuestions = [detail.question, `What value enters line ${selectedLine}?`, `What would a user see after this line?`]
@@ -119,10 +307,30 @@ export default function Page() {
     setThreads(t => [...t, { id: Date.now(), prompt: clean, answer: answerFor(clean), lines: [selectedLine] }])
     setQuestion('')
   }
-  function analyze() { if (!hasUserInput) { setRunError(`Paste JSON for ${codeKind === 'data transformation' ? 'the list this code processes' : 'the value this code receives'}.`); setRunResult(null); return } setRunError(''); setAnalyzed(false); setIsModelRunning(true); setActiveStep(0); let step = 0; const timer = window.setInterval(() => { step += 1; setActiveStep(step % modelSteps.length); if (step >= modelSteps.length) { window.clearInterval(timer); try { const parsed = JSON.parse(modelInput); if (codeKind === 'data transformation' && Array.isArray(parsed)) { const totals = parsed.reduce((sum: Record<string, number>, item: { category?: string; minutes?: number }) => { if (item.category) sum[item.category] = (sum[item.category] || 0) + Number(item.minutes || 0); return sum }, {}); const winner = Object.entries(totals).sort((a,b)=>b[1]-a[1])[0]; if (!winner) throw new Error('The list has no category values.'); setRunResult({ suggestion: winner[0], reason: winner[1] }); setModelOutput(`Returned { suggestion: "${winner[0]}", reason: ${winner[1]} } from ${parsed.length} items.`) } else { setRunResult(null); const keys = parsed && typeof parsed === 'object' ? Object.keys(parsed as object) : []; setModelOutput(`Input received by ${inputContract.name}: ${JSON.stringify(parsed)}\n\nSelected code: ${lines[selectedLine - 1]?.trim() || 'the selected line'}\n\nThis is the live value available at this point. The visual output updates from your input; arbitrary code execution is not simulated.`) } setAnalyzed(true); setIsModelRunning(false) } catch { setRunError('That input does not match the expected JSON shape. Try the example shown below.'); setRunResult(null); setAnalyzed(true); setIsModelRunning(false) } } }, 350) }
-  function togglePlay() { if (isPlaying) { setIsPlaying(false); return } setIsPlaying(true); let step = activeStep; const timer = window.setInterval(() => { step += 1; if (step >= modelSteps.length) { window.clearInterval(timer); setIsPlaying(false); setActiveStep(0); return } setActiveStep(step) }, 900) }
-  function chooseAction(action: 'why' | 'break' | 'change') { setContextAction(action); setGoal(action === 'why' ? 'story' : action); setModelOutput(action === 'why' ? `Line ${selectedLine} matters because it changes what the user ultimately sees: ${detail.explain}` : action === 'break' ? `Try an empty value, a missing property, a failed request, and repeated clicks. Watch which step cannot produce a valid output.` : `Edit the input, run again, and compare the output with the previous run. The selected line is the change point.`) }
-  function reset() { setCode(sampleCode); setSelectedLine(8); setSelectedRange([8, 8]); setTool('select'); setThreads([]); setNote(''); setMarks([]); setStrokes([]); setDrawingStroke(null); setAnalyzed(true); setPointing(false); setPointReady(false); setPointStart(null); setActiveStep(0); setIsPlaying(false); setContextAction(null); setFeedback('unreviewed'); setModelInput('[{"category":"Work","minutes":45},{"category":"Health","minutes":20}]'); setRunResult(null); setRunError(''); setModelOutput('Press Run example to see the returned value.') }
+  function analyze() {
+    if (!hasUserInput) { setRunError(`Paste JSON for ${codeKind === 'data transformation' ? 'the list this code processes' : 'the value this code receives'}.`); setRunResult(null); return }
+    setRunError(''); setAnalyzed(false); setIsModelRunning(true)
+    window.setTimeout(() => {
+      try {
+        const parsed = JSON.parse(modelInput)
+        if (codeKind === 'data transformation' && Array.isArray(parsed)) {
+          const totals: Record<string, number> = parsed.reduce((sum: Record<string, number>, item: { category?: string; minutes?: number }) => { if (item.category) sum[item.category] = (sum[item.category] || 0) + Number(item.minutes || 0); return sum }, {})
+          const winner = Object.entries(totals).sort((a, b) => (b[1] as number) - (a[1] as number))[0]
+          if (!winner) throw new Error('The list has no category values.')
+          setRunResult({ suggestion: winner[0], reason: winner[1] })
+          setModelOutput(`Returned { suggestion: "${winner[0]}", reason: ${winner[1]} } from ${parsed.length} items.`)
+        } else {
+          setRunResult(null)
+          setModelOutput(`Input received by ${inputContract.name}: ${JSON.stringify(parsed)}\n\nSelected code: ${lines[selectedLine - 1]?.trim() || 'the selected line'}\n\nThis is the live value available at this point. The visual output updates from your input; arbitrary code execution is not simulated.`)
+        }
+        setAnalyzed(true); setIsModelRunning(false)
+      } catch {
+        setRunError('That input does not match the expected JSON shape. Try the example shown below.'); setRunResult(null); setAnalyzed(true); setIsModelRunning(false)
+      }
+    }, 300)
+  }
+  function chooseAction(action: 'why' | 'break' | 'change') { setModelOutput(action === 'why' ? `Line ${selectedLine} matters because it changes what the user ultimately sees: ${detail.explain}` : action === 'break' ? `Try an empty value, a missing property, a failed request, and repeated clicks. Watch which step cannot produce a valid output.` : `Edit the input, run again, and compare the output with the previous run. The selected line is the change point.`) }
+  function reset() { setCode(sampleCode); setSelectedLine(8); setSelectedRange([8, 8]); setTool('select'); setThreads([]); setNote(''); setMarks([]); setStrokes([]); setDrawingStroke(null); setAnalyzed(true); setPointing(false); setPointReady(false); setPointStart(null); setDrawOverlay(null); setFeedback('unreviewed'); setModelInput('[{"category":"Work","minutes":45},{"category":"Health","minutes":20}]'); setRunResult(null); setRunError(''); setModelOutput('Press Run example to see the returned value.') }
   function selectLine(no: number, extend = false) {
     if (tool === 'point') { setSelectedLine(no); setSelectedRange([no, no]); setPointing(true); setPointStart(no); return }
     const range: [number, number] = extend ? [Math.min(selectedLine, no), Math.max(selectedLine, no)] : [no, no]
@@ -132,38 +340,38 @@ export default function Page() {
     if (tool !== 'point') return
     const rect = event.currentTarget.getBoundingClientRect()
     const point = { x: event.clientX - rect.left, y: event.clientY - rect.top }
-    setDrawingStroke({ points: [point] }); event.currentTarget.setPointerCapture(event.pointerId)
+    setDrawingStroke({ points: [point] })
+    try { event.currentTarget.setPointerCapture(event.pointerId) } catch { /* pointer capture is best-effort */ }
   }
   function draw(event: React.PointerEvent<HTMLDivElement>) {
     if (!drawingStroke) return
     const rect = event.currentTarget.getBoundingClientRect()
     setDrawingStroke({ points: [...drawingStroke.points, { x: event.clientX - rect.left, y: event.clientY - rect.top }] })
   }
-  function finishDrawing() { if (drawingStroke && drawingStroke.points.length > 3) setStrokes(s => [...s, drawingStroke]); setDrawingStroke(null) }
+  function finishDrawing() {
+    if (drawingStroke && drawingStroke.points.length > 3) {
+      setStrokes(s => [...s, drawingStroke])
+      const ys = drawingStroke.points.map(p => p.y)
+      const xs = drawingStroke.points.map(p => p.x)
+      const lineHeight = 22, topPad = 15
+      const topLine = Math.max(1, Math.min(lines.length, Math.round((Math.min(...ys) - topPad) / lineHeight) + 1))
+      const bottomLine = Math.max(1, Math.min(lines.length, Math.round((Math.max(...ys) - topPad) / lineHeight) + 1))
+      const lo = Math.min(topLine, bottomLine), hi = Math.max(topLine, bottomLine)
+      setSelectedRange([lo, hi]); setSelectedLine(hi); setPointReady(true)
+      setDrawOverlay({ x: Math.max(...xs), y: drawingStroke.points[drawingStroke.points.length - 1].y })
+    }
+    setDrawingStroke(null)
+  }
   function finishPoint(no: number) { setSelectedRange([Math.min(pointStart ?? no, no), Math.max(pointStart ?? no, no)]); setSelectedLine(no); setPointing(false); setPointReady(true); setPointStart(null) }
   function askAboutPoint() { ask(`Explain the highlighted ${codeKind.toLowerCase()} from lines ${selectedRange[0]}–${selectedRange[1]} using the pasted code.`) }
-  function runPlayground() {
-    setIsRunning(true)
-    window.setTimeout(() => {
-      const idea = featureBrief.trim() || 'this feature'
-      const results: Record<typeof playMode, string> = {
-        story: `A person wants to ${idea.toLowerCase()}. Define the moment of intent, the feedback after the action, and the state the interface should remember.`,
-        trace: `Map the data created by “${idea}”: who acted, what changed, when it changed, and what the UI needs to render after a reload.`,
-        change: `For “${idea}”, decide which screen state changes first, what the optimistic state looks like, and what the user can undo or retry.`,
-        break: `For “${idea}”, test an empty state, a failed request, a repeated action, and two people changing the same thing.`,
-      }
-      setPlayResult(`${results[playMode]}\n\nNext decision for the team: write one acceptance example for “${idea}” and agree who owns the loading, success, and failure states.`); setIsRunning(false)
-    }, 500)
-  }
-
   return <main className="mould-app">
     <header className="app-bar"><div className="wordmark"><span className="mark"><GitBranch /></span><b>mould</b><small>code, made visible</small></div><div className="bar-center"><span className="live"/> LIVE SESSION <span className="slash">/</span> {view === 'explainer' ? 'Code explainer' : 'Be friends with engineer'}</div><nav className="view-switcher" aria-label="Workspace"><button className={view==='explainer'?'view-active':''} onClick={()=>setView('explainer')}>Explain code</button><button className={view==='playground'?'view-active':''} onClick={()=>setView('playground')}>Be friends with engineer</button></nav><div className="bar-actions"><button onClick={reset} aria-label="Reset session"><RotateCcw/></button><button className="avatar">J</button></div></header>
-    <section className="hero"><div><p className="eyebrow"><Sparkles/> A code conversation</p><h1>Point at the part<br/><em>you don&apos;t understand.</em></h1><p className="hero-copy">Select a line to understand it, then run the example below to see the real returned output. Change the input to explore how the behavior changes.</p></div><div className="analyze-status"><span className={analyzed?'status-dot ready':'status-dot'}/>{analyzed?'Code mapped':'Reading code…'}<button onClick={analyze} disabled={!analyzed}><Play/> Analyze</button></div></section>
+    <section className="hero"><div><p className="eyebrow"><Sparkles/> {view==='playground'?'A design & engineering conversation':'A code conversation'}</p><h1>{view==='playground'?<>Turn intent into<br/><em>a shared decision.</em></>:<>Point at the part<br/><em>you don&apos;t understand.</em></>}</h1><p className="hero-copy">{view==='playground'?'Describe what you are building below. Mould reads the intent and builds a designer and engineer view around it — not a generic checklist.':'Select a line to understand it, then run the example below to see the real returned output. Change the input to explore how the behavior changes.'}</p></div>{view==='explainer'&&<div className="analyze-status"><span className={analyzed?'status-dot ready':'status-dot'}/>{analyzed?'Code mapped':'Reading code…'}<button onClick={analyze} disabled={!analyzed}><Play/> Analyze</button></div>}</section>
     {view === 'explainer' ? <section className="workspace">
-      <div className="code-pane widget"><div className="pane-head"><div><span className="pane-label">Source · editable</span><h2>Your code</h2></div><span className="js-badge">JS</span></div><div className="instruction">Click a line to understand it. Shift-click another line to explain a range. Use Trace from here to draw over the code.</div><div className="code-toolbar"><button type="button" className={tool==='select'?'tool-active':''} onClick={()=>{setTool('select');setPointing(false)}}><MousePointer2/> Select <small>line</small></button><button type="button" className={tool==='point'?'tool-active':''} onClick={()=>{setTool('point');setPointing(false)}}><Highlighter/> Trace from here <small>draw</small></button><span/><button onClick={reset}><RotateCcw/> Reset</button></div><div className="editor"><div className="line-numbers">{lines.map((_,i)=><button key={i} className={i+1>=selectedRange[0]&&i+1<=selectedRange[1]?'line-active':''} onPointerDown={()=>{if(tool==='point'){setPointing(true);setPointStart(i+1)}}} onPointerEnter={()=>{if(tool==='point'&&pointing) setSelectedRange([Math.min(pointStart??i+1,i+1),Math.max(pointStart??i+1,i+1)])}} onPointerUp={()=>{if(tool==='point') finishPoint(i+1)}} onClick={(event)=>selectLine(i+1,event.shiftKey)}>{String(i+1).padStart(2,'0')}</button>)}</div><textarea value={code} onChange={e=>setCode(e.target.value)} spellCheck={false} aria-label="Paste or edit code"/><div className={`ink-layer ${tool==='point'?'ink-active':''}`} onPointerDown={startDrawing} onPointerMove={draw} onPointerUp={finishDrawing} onPointerCancel={finishDrawing} aria-label="Point and draw over code">{[...strokes, ...(drawingStroke?[drawingStroke]:[])].map((stroke,index)=><svg key={index} className="ink-stroke" aria-hidden="true"><polyline points={stroke.points.map(point=>`${point.x},${point.y}`).join(' ')}/></svg>)}</div></div><div className="code-foot"><span>{lines.length} lines · editable</span><span>{tool==='point'?'Drag across line numbers to highlight a range':'Click one line to explain it; Shift-click to extend the selection'}</span></div>{note&&<div className="inline-note"><Pencil/> {note}<button onClick={()=>setNote('')} aria-label="Remove note"><X/></button></div>}</div>
-      <div className="explain-pane"><div className="pane-head"><div><span className="pane-label">Your selection</span><h2>Understand this code</h2></div><span className="map-meta">lines {selectedRange[0]}–{selectedRange[1]}</span></div><div className="selected-context"><span className="context-line">{selectedRange[0] === selectedRange[1] ? String(selectedLine).padStart(2,'0') : `${selectedRange[0]}–${selectedRange[1]}`}</span><div><b>{selectedRange[0] === selectedRange[1] ? detail.label : 'A connected block of code'}</b><code>{lines.slice(selectedRange[0]-1, selectedRange[1]).join(' ').trim() || '// choose lines'}</code></div><span className="tether-dot"/></div>{tool==='point'&&(pointing||pointReady)&&<div className="point-overlay"><b>{pointing?'Point mode':'Range selected'}</b><span>{pointing?'Drag across line numbers to highlight.':'Ask a question about the highlighted code.'}</span>{pointReady&&<button type="button" onClick={()=>{setPointReady(false);askAboutPoint()}}>Ask about this</button>}</div>}<div className="visual-model"><div className="model-head"><div><span className="plain-label">Live model · {codeKind}</span><b>{goalLabels.find(([key])=>key===goal)?.[1]}</b></div><span className={isModelRunning?'model-status running':'model-status'}>{isModelRunning?'mapping…':'mapped from your code'}</span></div><div className="model-tabs">{([['story','Understand'],['trace','Trace'],['change','Change']] as const).map(([key,label])=><button type="button" className={goal===key?'model-tab-active':''} onClick={()=>{setGoal(key);setContextAction(null);setModelOutput('Run Analyze to update this view.')}} key={key}>{label}</button>)}</div><div className="visual-stage"><div className="value-card"><span>Input from you</span><b>{modelInput || 'Add a value below to see it move'}</b></div><ArrowRight/><div className="value-card active-value"><span>Selected line {selectedLine}</span><b>{lines[selectedLine-1]?.trim() || 'Choose a line'}</b></div><ArrowRight/><div className="value-card"><span>What the user sees</span><b>{modelOutput || 'Run to see the result'}</b></div></div><div className="model-flow">{modelSteps.map((step,index)=><div className={index===activeStep?'model-step model-step-active':'model-step'} key={step}><span>{index+1}</span><b>{step}</b>{index<modelSteps.length-1&&<ArrowRight/>}</div>)}</div><div className="playback"><button type="button" onClick={()=>setActiveStep(Math.max(0,activeStep-1))}>Previous</button><button type="button" onClick={togglePlay}>{isPlaying?'Pause':'Play'}</button><button type="button" onClick={()=>setActiveStep(Math.min(modelSteps.length-1,activeStep+1))}>Next</button><button type="button" onClick={()=>{setActiveStep(0);setIsPlaying(false)}}>Restart</button><span>{activeStep+1} / {modelSteps.length}</span></div><div className="model-input"><div className="input-label"><label htmlFor="model-input">What should this function receive?</label><small><code>history</code> is a list of activity items. Edit the example or paste your own list.</small></div><textarea id="model-input" value={modelInput} onChange={e=>{setModelInput(e.target.value);setRunError('');setRunResult(null);setModelOutput('Press Run to calculate a new result from this input.')}} aria-label="Input data for the selected code"/><button type="button" onClick={analyze} disabled={isModelRunning}><Play/> {isModelRunning ? 'Running' : 'Run example'}</button></div><div className="input-helper"><span>Example shape</span><code>[&#123; &quot;category&quot;: &quot;Work&quot;, &quot;minutes&quot;: 45 &#125;]</code>{runError&&<b>{runError}</b>}</div><p className="model-output">{modelResult}</p><div className="model-badges"><span><Check/> Verified: line {selectedLine} is connected</span><span>Inferred: edge cases need your review</span></div><div className="context-actions">{codeQuestions.map(prompt=><button key={prompt} type="button" onClick={()=>ask(prompt)}>{prompt}</button>)}<button type="button" onClick={()=>chooseAction('why')}>Why does this matter?</button><button type="button" onClick={()=>chooseAction('break')}>What could break?</button><button type="button" onClick={()=>chooseAction('change')}>What if I change it?</button></div><div className="model-actions"><button type="button" aria-label="Mark explanation helpful" onClick={()=>setFeedback('approved')}>Thumbs up</button><button type="button" aria-label="Mark explanation unclear" onClick={()=>setFeedback('corrected')}>Thumbs down</button>{feedback==='approved'&&<b>Saved as a helpful format.</b>}{feedback==='corrected'&&<b>Try a smaller selection or ask a follow-up.</b>}</div></div><div className="explain-body"><span className="plain-label">This line, explained</span><p>{selectedRange[0] === selectedRange[1] ? detail.explain : `These ${selectedRange[1] - selectedRange[0] + 1} lines work together: ${detail.explain}`}</p><div className="decision-strip"><span>Why this matters in a real product</span><b>{detail.why}</b></div><div className="risk-row"><span>What could go wrong</span><p>{detail.risk}</p></div></div><div className="thread"><div className="thread-head"><MessageCircle/> Your questions <span>{threads.length}</span></div>{threads.length===0?<div className="empty-thread"><span>Ask anything about line {selectedLine}.</span><small>Try the prompt below. The answer will stay attached to this selection.</small></div>:threads.map(t=><div className="thread-item" key={t.id}><div className="you">You · line {t.lines.join(', ')}</div><b>{t.prompt}</b><p><span className="eng-dot"/> {t.answer}</p></div>)}<div className="suggestions"><span className="plain-label">Questions you can ask about line {selectedLine}</span><div className="quick-list"><button onClick={()=>ask(detail.question)}>{detail.question}<ArrowRight/></button><button onClick={()=>ask('What could go wrong here?')}>What could go wrong here?<ArrowRight/></button><button onClick={()=>ask('Explain this without code words')}>Explain this without code words<ArrowRight/></button></div></div><div className="question-row"><input value={question} onChange={e=>setQuestion(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.nativeEvent.isComposing&&e.keyCode!==229)ask()}} placeholder={`Ask about line ${selectedLine}…`} aria-label="Ask the engineer"/><button onClick={()=>ask()} aria-label="Send question"><ArrowRight/></button></div></div></div>
+      <div className="code-pane widget"><div className="pane-head"><div><span className="pane-label">Source · editable</span><h2>Your code</h2></div><span className="js-badge">JS</span></div><div className="instruction">Click a line to understand it. Shift-click another line to explain a range. Use Trace from here to draw over the code.</div><div className="code-toolbar"><button type="button" className={tool==='select'?'tool-active':''} onClick={()=>{setTool('select');setPointing(false);setDrawOverlay(null)}}><MousePointer2/> Select <small>line</small></button><button type="button" className={tool==='point'?'tool-active':''} onClick={()=>{setTool('point');setPointing(false);setDrawOverlay(null)}}><Highlighter/> Trace from here <small>draw</small></button><span/><button onClick={reset}><RotateCcw/> Reset</button></div><div className="editor"><div className="line-numbers">{lines.map((_,i)=><button key={i} className={i+1>=selectedRange[0]&&i+1<=selectedRange[1]?'line-active':''} onPointerDown={()=>{if(tool==='point'){setPointing(true);setPointStart(i+1)}}} onPointerEnter={()=>{if(tool==='point'&&pointing) setSelectedRange([Math.min(pointStart??i+1,i+1),Math.max(pointStart??i+1,i+1)])}} onPointerUp={()=>{if(tool==='point') finishPoint(i+1)}} onClick={(event)=>selectLine(i+1,event.shiftKey)}>{String(i+1).padStart(2,'0')}</button>)}</div><textarea value={code} onChange={e=>setCode(e.target.value)} spellCheck={false} aria-label="Paste or edit code"/><div className={`ink-layer ${tool==='point'?'ink-active':''}`} onPointerDown={startDrawing} onPointerMove={draw} onPointerUp={finishDrawing} onPointerCancel={finishDrawing} aria-label="Point and draw over code">{[...strokes, ...(drawingStroke?[drawingStroke]:[])].map((stroke,index)=><svg key={index} className="ink-stroke" aria-hidden="true"><polyline points={stroke.points.map(point=>`${point.x},${point.y}`).join(' ')}/></svg>)}</div>{drawOverlay&&pointReady&&tool==='point'&&<div className="trace-overlay" style={{left:Math.min(drawOverlay.x+14,300),top:Math.max(drawOverlay.y-8,0)}}><span>Traced lines {selectedRange[0]}–{selectedRange[1]}</span><button type="button" onClick={()=>{setDrawOverlay(null);setPointReady(false);askAboutPoint()}}>Ask about this <ArrowRight/></button></div>}</div><div className="code-foot"><span>{lines.length} lines · editable</span><span>{tool==='point'?'Drag across line numbers to highlight a range':'Click one line to explain it; Shift-click to extend the selection'}</span></div>{note&&<div className="inline-note"><Pencil/> {note}<button onClick={()=>setNote('')} aria-label="Remove note"><X/></button></div>}</div>
+      <div className="explain-pane"><div className="pane-head"><div><span className="pane-label">Your selection</span><h2>Understand this code</h2></div><span className="map-meta">lines {selectedRange[0]}–{selectedRange[1]}</span></div><div className="selected-context"><span className="context-line">{selectedRange[0] === selectedRange[1] ? String(selectedLine).padStart(2,'0') : `${selectedRange[0]}–${selectedRange[1]}`}</span><div><b>{selectedRange[0] === selectedRange[1] ? detail.label : 'A connected block of code'}</b><code>{lines.slice(selectedRange[0]-1, selectedRange[1]).join(' ').trim() || '// choose lines'}</code></div><span className="tether-dot"/></div>{tool==='point'&&(pointing||pointReady)&&<div className="point-overlay"><b>{pointing?'Point mode':'Range selected'}</b><span>{pointing?'Drag across line numbers to highlight.':'Ask a question about the highlighted code.'}</span>{pointReady&&<button type="button" onClick={()=>{setPointReady(false);askAboutPoint()}}>Ask about this</button>}</div>}<div className="visual-model"><div className="model-head"><div><span className="plain-label">Live model · {codeKind}</span><b>Input → selected line → output</b></div><span className={isModelRunning?'model-status running':'model-status'}>{isModelRunning?'mapping…':'mapped from your code'}</span></div><div className="visual-stage"><div className="value-card"><span>Input from you</span><b>{modelInput || 'Add a value below to see it move'}</b></div><ArrowRight/><div className="value-card active-value"><span>Selected line {selectedLine}</span><b>{lines[selectedLine-1]?.trim() || 'Choose a line'}</b></div><ArrowRight/><div className="value-card"><span>What the user sees</span><b>{modelOutput || 'Run to see the result'}</b></div></div><div className="model-input"><div className="input-label"><label htmlFor="model-input">What should this function receive?</label><small><code>history</code> is a list of activity items. Edit the example or paste your own list.</small></div><textarea id="model-input" value={modelInput} onChange={e=>{setModelInput(e.target.value);setRunError('');setRunResult(null);setModelOutput('Press Run to calculate a new result from this input.')}} aria-label="Input data for the selected code"/><button type="button" onClick={analyze} disabled={isModelRunning}><Play/> {isModelRunning ? 'Running' : 'Run example'}</button></div><div className="input-helper"><span>Example shape</span><code>[&#123; &quot;category&quot;: &quot;Work&quot;, &quot;minutes&quot;: 45 &#125;]</code>{runError&&<b>{runError}</b>}</div><p className="model-output">{modelResult}</p><div className="model-badges"><span><Check/> Verified: line {selectedLine} is connected</span><span>Inferred: edge cases need your review</span></div><div className="context-actions">{codeQuestions.map(prompt=><button key={prompt} type="button" onClick={()=>ask(prompt)}>{prompt}</button>)}<button type="button" onClick={()=>chooseAction('why')}>Why does this matter?</button><button type="button" onClick={()=>chooseAction('break')}>What could break?</button><button type="button" onClick={()=>chooseAction('change')}>What if I change it?</button></div><div className="model-actions"><button type="button" aria-label="Mark explanation helpful" onClick={()=>setFeedback('approved')}>Thumbs up</button><button type="button" aria-label="Mark explanation unclear" onClick={()=>setFeedback('corrected')}>Thumbs down</button>{feedback==='approved'&&<b>Saved as a helpful format.</b>}{feedback==='corrected'&&<b>Try a smaller selection or ask a follow-up.</b>}</div></div><div className="explain-body"><span className="plain-label">This line, explained</span><p>{selectedRange[0] === selectedRange[1] ? detail.explain : `These ${selectedRange[1] - selectedRange[0] + 1} lines work together: ${detail.explain}`}</p><div className="decision-strip"><span>Why this matters in a real product</span><b>{detail.why}</b></div><div className="risk-row"><span>What could go wrong</span><p>{detail.risk}</p></div></div><div className="thread"><div className="thread-head"><MessageCircle/> Your questions <span>{threads.length}</span></div>{threads.length===0?<div className="empty-thread"><span>Ask anything about line {selectedLine}.</span><small>Try the prompt below. The answer will stay attached to this selection.</small></div>:threads.map(t=><div className="thread-item" key={t.id}><div className="you">You · line {t.lines.join(', ')}</div><b>{t.prompt}</b><p><span className="eng-dot"/> {t.answer}</p></div>)}<div className="suggestions"><span className="plain-label">Questions you can ask about line {selectedLine}</span><div className="quick-list"><button onClick={()=>ask(detail.question)}>{detail.question}<ArrowRight/></button><button onClick={()=>ask('What could go wrong here?')}>What could go wrong here?<ArrowRight/></button><button onClick={()=>ask('Explain this without code words')}>Explain this without code words<ArrowRight/></button></div></div><div className="question-row"><input value={question} onChange={e=>setQuestion(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.nativeEvent.isComposing&&e.keyCode!==229)ask()}} placeholder={`Ask about line ${selectedLine}…`} aria-label="Ask the engineer"/><button onClick={()=>ask()} aria-label="Send question"><ArrowRight/></button></div></div></div>
     </section>
-    : <section className="playground"><div className="playground-header"><div><span className="pane-label">Be friends with engineer · interactive handoff</span><h2>Turn a design idea into a shared decision.</h2><p>Describe one feature. Choose a question. Mould will generate a concrete decision you can edit and discuss with an engineer.</p></div><button className="run-button" onClick={runPlayground} disabled={isRunning}><Play/> {isRunning?'Working…':'Run playground'}</button></div><div className="playground-input"><label htmlFor="feature-brief">What are you building?</label><textarea id="feature-brief" value={featureBrief} onChange={e=>{setFeatureBrief(e.target.value);setPlayResult('')}} placeholder="Describe the feature you are designing, e.g. Let users save a favorite article"/></div><div className="playground-result"><div className="result-map"><div className="collaboration-nodes">{collaborationMap.map(node=><button key={node.key} type="button" className={`collaboration-node ${selectedConcern===node.key?'node-selected':''}`} onClick={()=>{setSelectedConcern(node.key);setPlayResult(node.detail)}}><span>{node.label}</span><b>{node.value}</b></button>)}</div><div className="collaboration-detail"><span>{selectedConcernData.label}</span><p>{selectedConcernData.detail}</p></div><div className="perspective-grid"><article><span>Designer checks</span><b>What should the person see and feel?</b><p>Define the visible state, feedback, and recovery for “{featureBrief}”.</p></article><article><span>Engineer checks</span><b>What must the system guarantee?</b><p>Define the data, request state, validation, and failure behavior for “{featureBrief}”.</p></article></div><div className="result-node"><span>Design intent</span><b>{featureBrief || 'Your feature'}</b></div><ArrowRight/><div className="result-node"><span>Shared decision</span><b>{playMode==='story'?'What should the user feel?':playMode==='trace'?'What data must exist?':playMode==='change'?'What changes in the UI?':'What can fail?'}</b></div><ArrowRight/><div className="result-node"><span>Engineering handoff</span><b>{playMode==='break'?'Agree on edge cases':'A testable next step'}</b></div></div><div className="result-copy">{playResult ? <><span className="pane-label">Mould says</span><p>{playResult}</p></> : <><span className="pane-label">Your result will appear here</span><p>Choose a lens, then run the playground. This is where the vague idea becomes a shared decision.</p></>}</div></div><section className="output-section" aria-live="polite"><div className="output-heading"><div><span className="pane-label">After running the code</span><h3>Output</h3></div><span className="output-state">{isModelRunning ? 'Running…' : hasUserInput ? 'Ready to inspect' : 'Waiting for input'}</span></div><div className="output-stage"><div className="output-value"><span>Returned value</span><pre>{modelOutput}</pre></div><div className="output-preview"><span>What a user could see</span><div className="preview-screen"><b>{hasUserInput ? 'Recommendation preview' : 'Run the example to preview the result'}</b><small>{hasUserInput ? modelOutput : 'Your code’s returned value will appear here.'}</small></div></div></div></section><section className="live-output" aria-live="polite"><div><span className="pane-label">Live result</span><h3>What the code returned</h3></div><pre>{runResult ? `{ suggestion: "${runResult.suggestion}", reason: ${runResult.reason} }` : modelOutput}</pre><div className="live-preview"><span>Product preview</span><b>{runResult?.suggestion || 'Run the example to see the result'}</b><small>{runResult ? `${runResult.reason} minutes selected from your input` : 'This updates when you edit the input and press Run.'}</small></div></section><div className="question-dock"><span className="pane-label">Continue the conversation</span><input value={question} onChange={e=>setQuestion(e.target.value)} placeholder="Ask what to clarify with engineering…"/><button onClick={()=>{setView('explainer');setQuestion(question || 'What should I clarify before handing this off?')}}>Ask Mould <ArrowRight/></button></div></section>}
+    : <section className="playground"><div className="playground-header"><div><span className="pane-label">Be friends with engineer · interactive handoff</span><h2>Turn a design idea into a shared decision.</h2><p>Describe one feature in your own words below. Mould reads the intent and adapts the designer and engineer view to it — not a generic checklist everyone already knows.</p></div></div><div className="playground-input"><label htmlFor="feature-brief">What are you building?</label><textarea id="feature-brief" value={featureBrief} onChange={e=>setFeatureBrief(e.target.value)} placeholder="Describe the feature you are designing, e.g. Let users save a favorite article"/></div><div className="collab-board"><div className="collaboration-nodes">{collaborationMap.map(node=><button key={node.key} type="button" className={`collaboration-node ${selectedConcern===node.key?'node-selected':''}`} onClick={()=>setSelectedConcern(node.key)}><span>{node.label}</span><b>{node.value}</b></button>)}</div><div className="collaboration-detail"><span>{selectedConcernData.label}</span><p>{selectedConcernData.detail}</p></div><div className="pov-grid"><article className="pov-card pov-designer"><div className="pov-head"><Pencil/><span>Designer lens</span></div><b>{insight.designer.question}</b><ul>{insight.designer.points.map(point=><li key={point}>{point}</li>)}</ul></article><article className="pov-card pov-engineer"><div className="pov-head"><Code2/><span>Engineer lens</span></div><b>{insight.engineer.question}</b><ul>{insight.engineer.points.map(point=><li key={point}>{point}</li>)}</ul></article></div><div className="handoff-card"><span className="pane-label">Shared handoff for &ldquo;{featureName}&rdquo;</span><p>{insight.handoff}</p></div></div><div className="question-dock"><span className="pane-label">Continue the conversation</span><input value={question} onChange={e=>setQuestion(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.nativeEvent.isComposing&&e.keyCode!==229){setView('explainer');setQuestion(question || 'What should I clarify before handing this off?')}}} placeholder="Ask what to clarify with engineering…"/><button onClick={()=>{setView('explainer');setQuestion(question || 'What should I clarify before handing this off?')}}>Ask Mould <ArrowRight/></button></div></section>}
     <footer className="footer-note"><span><Code2/> Mould translates engineering decisions into a conversation.</span><span>Hackathon prototype · local session</span></footer>
   </main>
 }
