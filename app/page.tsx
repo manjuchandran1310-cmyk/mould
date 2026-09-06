@@ -1,51 +1,97 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { ArrowRight, Check, ChevronDown, ChevronRight, Code2, GitBranch, Lightbulb, Play, RotateCcw, Sparkles, X, Zap } from 'lucide-react'
+import { ArrowRight, Check, CircleHelp, Code2, GitBranch, Highlighter, MousePointer2, Pencil, Play, Plus, RotateCcw, Sparkles, X, Zap } from 'lucide-react'
 
-type Step = { id: string; label: string; title: string; color: string; code: string; explanation: string; why: string; output: string }
+type NodeKind = 'input' | 'transform' | 'decision' | 'output'
+type MapNode = { id: string; kind: NodeKind; title: string; body: string; detail: string; x: number; y: number; accent: string }
 
-const steps: Step[] = [
-  { id: 'input', label: '1 · Input', title: 'User history', color: 'yellow', code: 'const history = [\n  { category: "running", minutes: 32 },\n  { category: "reading", minutes: 18 },\n  { category: "running", minutes: 24 },\n]', explanation: 'The function starts with evidence. Each item is a tiny record of what the person did before.', why: 'Without history, the recommender has nothing personal to learn from.', output: '3 recent activities' },
-  { id: 'score', label: '2 · Score', title: 'Find a pattern', color: 'blue', code: 'const scores = history.reduce((totals, item) => {\n  totals[item.category] =\n    (totals[item.category] || 0) + item.minutes\n  return totals\n}, {})', explanation: 'reduce folds many events into one useful summary. Here it totals minutes for each category.', why: 'The computer cannot “notice” a pattern like a person does. We make the pattern explicit.', output: 'running: 56 min · reading: 18 min' },
-  { id: 'decide', label: '3 · Decide', title: 'Pick the best match', color: 'coral', code: 'const favorite = Object.entries(scores)\n  .sort((a, b) => b[1] - a[1])[0][0]\n\nreturn `Try ${favorite} next`', explanation: 'The largest score becomes the recommendation. This is a rule, not magic.', why: 'Every recommendation has a decision boundary. Seeing it makes the output explainable.', output: 'Try running next' },
-  { id: 'output', label: '4 · Output', title: 'Explain the result', color: 'green', code: 'return {\n  suggestion: "Try running next",\n  reason: "You spent 56 minutes running"\n}', explanation: 'A good product returns the answer and the reason together. The reason is the bridge back to the code.', why: 'If a user can challenge the reason, they can trust—or correct—the system.', output: 'Suggestion + reason' },
+const sampleCode = `function recommend(history) {
+  const totals = history.reduce((sum, item) => {
+    sum[item.category] = (sum[item.category] || 0) + item.minutes
+    return sum
+  }, {})
+
+  const favorite = Object.entries(totals)
+    .sort((a, b) => b[1] - a[1])[0][0]
+
+  return { suggestion: favorite, reason: totals[favorite] }
+}`
+
+const baseNodes: MapNode[] = [
+  { id: 'input', kind: 'input', title: 'history', body: 'A list of past activities enters the function.', detail: 'The function cannot infer intent from nowhere. This is the evidence it is allowed to use.', x: 8, y: 25, accent: '#c58b31' },
+  { id: 'transform', kind: 'transform', title: 'totals', body: 'reduce() groups minutes by category.', detail: 'Many events become one summary object. This is the first engineering choice: what signal should count?', x: 34, y: 25, accent: '#5a83a7' },
+  { id: 'decision', kind: 'decision', title: 'favorite', body: 'sort() chooses the largest total.', detail: 'This is the decision boundary. Change the totals and the winner changes. Nothing here is random.', x: 59, y: 25, accent: '#b86d57' },
+  { id: 'output', kind: 'output', title: 'recommendation', body: 'The winner and its reason leave the function.', detail: 'Returning the reason makes the behavior inspectable instead of a black box.', x: 82, y: 25, accent: '#69947c' },
 ]
 
+const answers = ['What if two categories tie?', 'Which line makes the choice?', 'What could go wrong here?']
+
 export default function Page() {
-  const [active, setActive] = useState(0)
-  const [showCode, setShowCode] = useState(true)
-  const [quiz, setQuiz] = useState<'idle' | 'correct' | 'wrong'>('idle')
-  const step = steps[active]
-  const progress = useMemo(() => Math.round(((active + 1) / steps.length) * 100), [active])
+  const [code, setCode] = useState(sampleCode)
+  const [nodes, setNodes] = useState(baseNodes)
+  const [selected, setSelected] = useState('decision')
+  const [selectedLine, setSelectedLine] = useState(8)
+  const [analyzed, setAnalyzed] = useState(true)
+  const [mode, setMode] = useState<'select' | 'point' | 'draw'>('select')
+  const [question, setQuestion] = useState('')
+  const [answer, setAnswer] = useState('')
+  const [annotations, setAnnotations] = useState<string[]>([])
+  const [branch, setBranch] = useState(false)
+  const activeNode = nodes.find((node) => node.id === selected) ?? nodes[2]
+  const lines = useMemo(() => code.split('\n'), [code])
 
-  function selectStep(index: number) { setActive(index); setQuiz('idle') }
-  function reset() { setActive(0); setQuiz('idle'); setShowCode(true) }
+  function analyze() {
+    setAnalyzed(false)
+    setAnswer('')
+    window.setTimeout(() => setAnalyzed(true), 450)
+  }
 
-  return (
-    <main className="lesson-shell">
-      <header className="lesson-topbar">
-        <div className="brand"><span className="brand-mark"><GitBranch /></span><strong>mould</strong><small>beta</small></div>
-        <div className="lesson-title"><span>Interactive lesson</span><b>How a recommender works</b></div>
-        <button className="reset-button" onClick={reset}><RotateCcw /> Reset</button>
-      </header>
+  function reset() {
+    setCode(sampleCode); setNodes(baseNodes); setSelected('decision'); setSelectedLine(8); setAnnotations([]); setBranch(false); setMode('select'); setAnswer(''); setQuestion(''); setAnalyzed(true)
+  }
 
-      <section className="lesson-intro"><div><p className="eyebrow"><span className="live-dot" /> Learn by tracing the logic</p><h1>From activity to a recommendation.</h1><p>Click each part of the map to see what the code is doing, why it matters, and how the result is formed.</p></div><div className="progress-wrap"><div><span>Lesson progress</span><b>{progress}%</b></div><div className="progress-bar"><i style={{ width: `${progress}%` }} /></div></div></section>
+  function dragNode(id: string, event: React.DragEvent<HTMLButtonElement>) {
+    event.dataTransfer.setData('node-id', id)
+  }
 
-      <section className="lesson-layout">
-        <div className="lesson-canvas">
-          <div className="canvas-caption"><span><Sparkles /> One small recommender</span><span>4 steps · 2 min</span></div>
-          <div className="flow-map">
-            <div className="flow-line" />
-            {steps.map((item, index) => <button key={item.id} onClick={() => selectStep(index)} className={`flow-card ${item.color} ${active === index ? 'active' : ''}`}><div className="flow-card-head"><span className="step-number">{index + 1}</span><span className="flow-label">{item.label}</span>{active === index && <span className="active-dot" />}</div><strong>{item.title}</strong><p>{item.output}</p><span className="click-hint">{active === index ? 'Selected' : 'Click to inspect'} <ChevronRight /></span></button>)}
-          </div>
-          <div className="canvas-footer"><span><span className="legend-dot yellow" /> input</span><span><span className="legend-dot blue" /> transform</span><span><span className="legend-dot coral" /> decision</span><span><span className="legend-dot green" /> explanation</span></div>
-        </div>
+  function dropNode(event: React.DragEvent<HTMLDivElement>) {
+    event.preventDefault()
+    const id = event.dataTransfer.getData('node-id')
+    if (!id) return
+    const rect = event.currentTarget.getBoundingClientRect()
+    const x = Math.max(3, Math.min(88, ((event.clientX - rect.left) / rect.width) * 100 - 8))
+    const y = Math.max(8, Math.min(72, ((event.clientY - rect.top) / rect.height) * 100 - 8))
+    setNodes((current) => current.map((node) => node.id === id ? { ...node, x, y } : node))
+  }
 
-        <aside className="inspector"><div className="inspector-head"><div><p className="eyebrow">Selected step</p><h2>{step.title}</h2></div><span className={`status-pill ${step.color}`}><span /> {active === 3 ? 'Explained' : 'Inspecting'}</span></div><div className="explanation-block"><div className="section-kicker"><Lightbulb /> In plain language</div><p>{step.explanation}</p><div className="why-box"><b>Why this exists</b><span>{step.why}</span></div></div><div className="code-section"><button className="code-toggle" onClick={() => setShowCode(!showCode)}><span><Code2 /> The code</span>{showCode ? <ChevronDown /> : <ChevronRight />}</button>{showCode && <pre><code>{step.code}</code></pre>}</div><div className="result-box"><span>What comes out</span><strong>{step.output}</strong></div>{active < steps.length - 1 ? <button className="next-button" onClick={() => selectStep(active + 1)}>Next step <ArrowRight /></button> : <div className="quiz"><div className="quiz-heading"><Zap /> Check your understanding</div><p>Why did the system recommend running?</p><div className="quiz-options"><button className={quiz === 'correct' ? 'chosen correct' : ''} onClick={() => setQuiz('correct')}>It found the most minutes there</button><button className={quiz === 'wrong' ? 'chosen wrong' : ''} onClick={() => setQuiz('wrong')}>It randomly picked an activity</button></div>{quiz !== 'idle' && <div className={`quiz-feedback ${quiz}`}>{quiz === 'correct' ? <><Check /> Exactly. The score made the decision visible.</> : <><X /> Not quite. Trace back to the scoring step.</>}</div>}</div>}</aside>
-      </section>
+  function ask(value: string) {
+    setQuestion(value)
+    setAnswer(value.includes('tie') ? 'A tie is not handled explicitly. JavaScript keeps the first item after sorting, so equal evidence creates an arbitrary winner.' : value.includes('choice') ? 'The choice happens on the sort line. It compares the accumulated values and takes the first, largest entry.' : 'Empty history, missing minutes, and equal totals are all edge cases this function should make explicit.')
+  }
 
-      <footer className="lesson-footer"><span><Play /> <b>Try it yourself</b> Change the minutes in the input step and watch the recommendation change.</span><button onClick={() => selectStep(0)}>Back to input <ArrowRight /></button></footer>
-    </main>
-  )
+  function addAnnotation() {
+    setAnnotations((current) => [...current, `Line ${selectedLine}: ask why this matters`])
+  }
+
+  return <main className="mould-app">
+    <header className="app-bar"><div className="wordmark"><span className="mark"><GitBranch /></span><b>mould</b><small>code, made visible</small></div><div className="bar-center"><span className="live" /> Live canvas <span className="slash">/</span> untitled analysis</div><div className="bar-actions"><button onClick={reset} aria-label="Reset canvas"><RotateCcw /></button><button className="avatar">J</button></div></header>
+
+    <section className="hero"><div><p className="eyebrow"><Sparkles /> Bring any code</p><h1>Make the invisible<br /><em>feel obvious.</em></h1><p className="hero-copy">Paste a piece of code. Mould maps the inputs, transformations, decisions, and what-ifs so you can reason about it like an engineer.</p></div><div className="analyze-status"><span className={analyzed ? 'status-dot ready' : 'status-dot'} />{analyzed ? 'Analysis ready' : 'Reading your code…'}<button onClick={analyze}><Play /> Analyze</button></div></section>
+
+    <section className="workspace">
+      <div className="code-pane">
+        <div className="pane-head"><div><span className="pane-label">01 / Source</span><h2>Drop in your code</h2></div><span className="js-badge">JS</span></div>
+        <div className="code-toolbar"><button className={mode === 'select' ? 'tool-active' : ''} onClick={() => setMode('select')}><MousePointer2 /> Select</button><button className={mode === 'point' ? 'tool-active' : ''} onClick={() => setMode('point')}><Highlighter /> Point</button><button className={mode === 'draw' ? 'tool-active' : ''} onClick={() => setMode('draw')}><Pencil /> Draw</button><span /> <button onClick={addAnnotation}><Plus /> Annotate</button></div>
+        <div className={`editor ${mode}`}><div className="line-numbers">{lines.map((_, index) => <button key={index} className={selectedLine === index + 1 ? 'line-active' : ''} onClick={() => setSelectedLine(index + 1)}>{String(index + 1).padStart(2, '0')}</button>)}</div><textarea value={code} onChange={(event) => setCode(event.target.value)} spellCheck={false} aria-label="Code editor" /></div>
+        <div className="code-foot"><span>{lines.length} lines · editable</span><span>{mode === 'point' ? 'Click a line to point' : mode === 'draw' ? 'Draw mode active' : 'Select a line to inspect'}</span></div>
+        {annotations.length > 0 && <div className="annotations"><b>Your annotations</b>{annotations.map((item, index) => <span key={index}><Pencil />{item}</span>)}</div>}
+      </div>
+
+      <div className="map-pane"><div className="pane-head"><div><span className="pane-label">02 / Model</span><h2>How it thinks</h2></div><span className="map-meta">drag nodes · click to inspect</span></div><div className="map-canvas" onDragOver={(event) => event.preventDefault()} onDrop={dropNode}><svg className="connections" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="M16 33 C24 18, 27 18, 40 33" /><path d="M42 33 C50 18, 54 18, 65 33" /><path d="M67 33 C75 18, 79 18, 88 33" />{branch && <path className="branch-line" d="M65 36 C73 52, 78 58, 87 59" />}</svg>{nodes.map((node) => <button key={node.id} draggable onDragStart={(event) => dragNode(node.id, event)} onClick={() => setSelected(node.id)} className={`map-node ${selected === node.id ? 'node-selected' : ''}`} style={{ left: `${node.x}%`, top: `${node.y}%`, '--accent': node.accent } as React.CSSProperties}><span className="node-kind">{node.kind}</span><strong>{node.title}</strong><p>{node.body}</p><span className="node-grip">•••</span></button>)}{branch && <button className="map-node branch-node" onClick={() => setSelected('decision')}><span className="node-kind">what if</span><strong>tie?</strong><p>Both categories score 40.</p></button>}<div className="map-hint"><span><Zap /> Trace the path</span><span>input → decision → output</span></div></div><div className="map-foot"><button onClick={() => setBranch(true)}><GitBranch /> Branch a what-if</button><span>Nodes are a living explanation, not a diagram.</span></div></div>
+    </section>
+
+    <section className="insight-row"><div className="insight-card"><div className="insight-kicker"><span className="number">03</span><span>Selected line {selectedLine}</span></div><h2>What is happening here?</h2><p>{activeNode.detail}</p><div className="line-context"><code>{lines[selectedLine - 1] || '// select a line'}</code><span>↳ connected to <b>{activeNode.title}</b></span></div></div><div className="ask-card"><div className="ask-head"><CircleHelp /> Ask about this code</div><div className="question-chips">{answers.map((item) => <button key={item} onClick={() => ask(item)}>{item}</button>)}</div><div className="ask-input"><input value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.nativeEvent.isComposing && event.keyCode !== 229) ask(question) }} placeholder="Ask a follow-up…" /><button onClick={() => ask(question)}><ArrowRight /></button></div>{answer && <div className="answer"><Check /> {answer}</div>}</div></section>
+    <footer className="footer-note"><span><Code2 /> Mould turns code into a surface you can question.</span><span>Hackathon prototype · state is local to this session</span></footer>
+  </main>
 }
