@@ -136,12 +136,12 @@ export default function Page() {
     window.setTimeout(() => {
       const idea = featureBrief.trim() || 'this feature'
       const results: Record<typeof playMode, string> = {
-        story: `A person wants to ${idea.toLowerCase()}. The product needs a clear action, feedback that it worked, and a way to remember the choice.`,
-        trace: `The shared decision is the data shape: { userId, itemId, savedAt }. Design owns the moment of intent; engineering owns persistence and failure states.`,
-        change: `If the user is offline, keep the optimistic UI but show “Will sync when you’re back.” This preserves confidence without pretending the save succeeded.`,
-        break: `Ask what happens when the item is already saved, the request fails, or two tabs disagree. Those are the edges worth agreeing on before handoff.`,
+        story: `A person wants to ${idea.toLowerCase()}. Define the moment of intent, the feedback after the action, and the state the interface should remember.`,
+        trace: `Map the data created by “${idea}”: who acted, what changed, when it changed, and what the UI needs to render after a reload.`,
+        change: `For “${idea}”, decide which screen state changes first, what the optimistic state looks like, and what the user can undo or retry.`,
+        break: `For “${idea}”, test an empty state, a failed request, a repeated action, and two people changing the same thing.`,
       }
-      setPlayResult(`${results[playMode]}\n\nNext decision: write one acceptance example for “${idea}” and test it with an engineer.`); setIsRunning(false)
+      setPlayResult(`${results[playMode]}\n\nNext decision for the team: write one acceptance example for “${idea}” and agree who owns the loading, success, and failure states.`); setIsRunning(false)
     }, 500)
   }
 
