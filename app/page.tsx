@@ -1,10 +1,11 @@
 'use client'
 
 import { useMemo, useRef, useState } from 'react'
-import { ArrowRight, Check, CircleHelp, Code2, GitBranch, Highlighter, MousePointer2, Pencil, Play, Plus, RotateCcw, Sparkles, X } from 'lucide-react'
+import { ArrowRight, Check, CircleHelp, Code2, GitBranch, Highlighter, MessageCircle, MousePointer2, Pencil, Play, Plus, RotateCcw, Sparkles, X } from 'lucide-react'
 
-type Tool = 'select' | 'point' | 'draw'
-type Node = { id: string; title: string; kind: string; body: string; lines: number[]; x: number; y: number }
+type Tool = 'select' | 'point' | 'circle'
+type Line = { no: number; code: string; label: string; explain: string; question: string }
+type Thread = { id: number; prompt: string; answer: string; lines: number[] }
 
 const sampleCode = `function recommend(history) {
   const totals = history.reduce((sum, item) => {
@@ -18,52 +19,58 @@ const sampleCode = `function recommend(history) {
   return { suggestion: favorite, reason: totals[favorite] }
 }`
 
-const initialNodes: Node[] = [
-  { id:'input', title:'history', kind:'INPUT', body:'A list of activity records enters the function.', lines:[1,2], x:8, y:28 },
-  { id:'group', title:'totals', kind:'TRANSFORM', body:'reduce groups minutes by category.', lines:[2,3,4,5], x:34, y:18 },
-  { id:'choose', title:'favorite', kind:'DECISION', body:'sort ranks the categories and selects the winner.', lines:[8,9], x:58, y:34 },
-  { id:'output', title:'recommendation', kind:'OUTPUT', body:'The winner and evidence leave the function.', lines:[11], x:82, y:22 },
-]
+const explanations: Record<number, Omit<Line, 'no' | 'code'>> = {
+  1: { label: 'The promise', explain: 'This function expects a list of activities and promises to recommend one category. Nothing has been chosen yet.', question: 'What does this function need as input?' },
+  2: { label: 'Start a tally', explain: 'reduce walks through every activity. sum is the running notebook; item is the activity currently being read.', question: 'Why use reduce here?' },
+  3: { label: 'Use the category as a key', explain: 'The category becomes a label in the totals object, like “Leisure” or “Work”. This is where raw history becomes grouped evidence.', question: 'What happens if a category is missing?' },
+  4: { label: 'Add the minutes', explain: 'The old total is read, then this activity’s minutes are added. The fallback 0 means the first activity in a category can still be counted.', question: 'Why is there a || 0?' },
+  5: { label: 'Keep the notebook', explain: 'Returning sum passes the updated tally to the next activity. Without this return, the next loop would lose the work so far.', question: 'What breaks if return is removed?' },
+  8: { label: 'Rank the evidence', explain: 'Object.entries turns the tally into pairs. sort puts the largest total first by comparing each pair’s minutes.', question: 'Is sorting changing the original history?' },
+  9: { label: 'Pick the winner', explain: '[0] means “take the first pair”. [0] again means “take its category”. This is the exact decision line.', question: 'What if two categories tie?' },
+  11: { label: 'Explain the recommendation', explain: 'The function returns both the winner and its supporting number, so another screen can show not only what to try but why.', question: 'Where would this result be displayed?' },
+}
 
 export default function Page() {
   const [code, setCode] = useState(sampleCode)
-  const [nodes, setNodes] = useState(initialNodes)
   const [selectedLine, setSelectedLine] = useState(8)
-  const [selected, setSelected] = useState('choose')
   const [tool, setTool] = useState<Tool>('select')
-  const [paths, setPaths] = useState<string[]>([])
-  const [annotations, setAnnotations] = useState<{line:number;text:string}[]>([])
-  const [branch, setBranch] = useState(false)
+  const [analyzed, setAnalyzed] = useState(true)
+  const [threads, setThreads] = useState<Thread[]>([])
   const [question, setQuestion] = useState('')
-  const [answer, setAnswer] = useState('')
-  const [analyzing, setAnalyzing] = useState(false)
-  const [editingAnnotation, setEditingAnnotation] = useState(false)
-  const canvasRef = useRef<HTMLDivElement>(null)
-  const drawing = useRef<string[]>([])
+  const [note, setNote] = useState('')
+  const [circle, setCircle] = useState<{x:number;y:number;w:number;h:number} | null>(null)
+  const [drawing, setDrawing] = useState(false)
+  const circleStart = useRef<{x:number;y:number} | null>(null)
   const lines = useMemo(() => code.split('\n'), [code])
-  const activeNode = nodes.find(n => n.id === selected) ?? nodes[2]
-  const connected = nodes.filter(n => n.lines.includes(selectedLine))
+  const detail = explanations[selectedLine] ?? { label: 'Read this line', explain: 'Select a line with a clear job and Mould will translate it into plain engineering language.', question: 'What should I look at next?' }
 
-  function analyze() { setAnalyzing(true); setAnswer(''); window.setTimeout(() => { setAnalyzing(false); setSelectedLine(1) }, 500) }
-  function reset() { setCode(sampleCode); setNodes(initialNodes); setSelected('choose'); setSelectedLine(8); setPaths([]); setAnnotations([]); setBranch(false); setAnswer(''); setTool('select') }
-  function moveNode(id:string, e:React.PointerEvent) { if (tool !== 'select' || !canvasRef.current) return; const r=canvasRef.current.getBoundingClientRect(); const x=Math.max(2,Math.min(88,(e.clientX-r.left)/r.width*100-7)); const y=Math.max(8,Math.min(76,(e.clientY-r.top)/r.height*100-7)); setNodes(ns=>ns.map(n=>n.id===id?{...n,x,y}:n)) }
-  function selectLine(line:number) { setSelectedLine(line); const match=nodes.find(n=>n.lines.includes(line)); if(match) setSelected(match.id) }
-  function pointerDown(e:React.PointerEvent) { if(tool !== 'draw' || !canvasRef.current) return; const r=canvasRef.current.getBoundingClientRect(); drawing.current=[`${((e.clientX-r.left)/r.width*100).toFixed(1)},${((e.clientY-r.top)/r.height*100).toFixed(1)}`]; (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) }
-  function pointerMove(e:React.PointerEvent) { if(tool !== 'draw' || !drawing.current.length || !canvasRef.current) return; const r=canvasRef.current.getBoundingClientRect(); drawing.current.push(`${((e.clientX-r.left)/r.width*100).toFixed(1)},${((e.clientY-r.top)/r.height*100).toFixed(1)}`); setPaths(p=>[...p.slice(0,-1), drawing.current.join(' ')]) }
-  function pointerUp() { if(drawing.current.length){ setPaths(p=>[...p, drawing.current.join(' ')]); drawing.current=[] } }
-  function ask(q:string) { setQuestion(q); setAnswer(q.toLowerCase().includes('tie') ? 'There is no explicit tie-breaker. Equal totals resolve by order, so the first item wins even when the evidence is identical.' : q.toLowerCase().includes('wrong') ? 'Empty history, missing minutes, and equal totals are the main risks. Try annotating this line to leave a review note.' : `This line connects to ${activeNode.title}: ${activeNode.body}`) }
-  function addAnnotation() { setEditingAnnotation(true) }
-  function saveAnnotation(e:React.FormEvent<HTMLFormElement>) { e.preventDefault(); const text=new FormData(e.currentTarget).get('note')?.toString().trim(); if(text) setAnnotations(a=>[...a,{line:selectedLine,text}]); setEditingAnnotation(false) }
+  function answerFor(prompt: string) {
+    if (prompt.toLowerCase().includes('tie')) return 'If two categories have the same total, sort has no explicit tie-breaker. JavaScript keeps their order, so the first one encountered wins. An engineer might add a second comparison if that matters.'
+    if (prompt.toLowerCase().includes('reduce')) return 'reduce is useful because it turns many activity records into one compact summary. Think of it as one notebook that gets updated once per activity.'
+    if (prompt.toLowerCase().includes('break')) return 'Without return sum, the next loop receives undefined. The tally disappears after the first activity, so the recommendation cannot be trusted.'
+    if (prompt.toLowerCase().includes('missing')) return 'A missing category becomes the key undefined. Production code would usually validate the input before this function starts.'
+    return `Line ${selectedLine} is the part you pointed at. ${detail.explain} In a real system, this is where you would check the assumption before shipping.`
+  }
+  function ask(prompt = question) {
+    const clean = prompt.trim(); if (!clean) return
+    setThreads(t => [...t, { id: Date.now(), prompt: clean, answer: answerFor(clean), lines: [selectedLine] }])
+    setQuestion('')
+  }
+  function analyze() { setAnalyzed(false); window.setTimeout(() => setAnalyzed(true), 500) }
+  function reset() { setCode(sampleCode); setSelectedLine(8); setTool('select'); setThreads([]); setCircle(null); setNote(''); setAnalyzed(true) }
+  function selectLine(no: number) { setSelectedLine(no); setCircle(null) }
+  function startCircle(e: React.PointerEvent) { if (tool !== 'circle') return; const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); circleStart.current = { x: e.clientX-r.left, y: e.clientY-r.top }; setDrawing(true); (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) }
+  function moveCircle(e: React.PointerEvent) { if (!drawing || !circleStart.current) return; const r=(e.currentTarget as HTMLElement).getBoundingClientRect(); const x=e.clientX-r.left,y=e.clientY-r.top,s=circleStart.current; setCircle({x:Math.min(s.x,x),y:Math.min(s.y,y),w:Math.abs(x-s.x),h:Math.abs(y-s.y)}) }
+  function endCircle() { setDrawing(false); circleStart.current=null }
 
   return <main className="mould-app">
-    <header className="app-bar"><div className="wordmark"><span className="mark"><GitBranch /></span><b>mould</b><small>code, made visible</small></div><div className="bar-center"><span className="live"/> LIVE CANVAS <span className="slash">/</span> Untitled analysis</div><div className="bar-actions"><button onClick={reset} aria-label="Reset canvas"><RotateCcw/></button><button className="avatar">J</button></div></header>
-    <section className="hero"><div><p className="eyebrow"><Sparkles/> Open code explainability</p><h1>Bring code.<br/><em>See the reasoning.</em></h1><p className="hero-copy">Paste any function, then point at the exact lines you want to understand. Mould turns the code into a live map you can move, mark, draw on, and question.</p></div><div className="analyze-status"><span className={analyzing?'status-dot':'status-dot ready'}/>{analyzing?'Reading your code…':'Analysis ready'}<button onClick={analyze} disabled={analyzing}><Play/> Analyze</button></div></section>
+    <header className="app-bar"><div className="wordmark"><span className="mark"><GitBranch /></span><b>mould</b><small>code, made visible</small></div><div className="bar-center"><span className="live"/> LIVE SESSION <span className="slash">/</span> Untitled analysis</div><div className="bar-actions"><button onClick={reset} aria-label="Reset session"><RotateCcw/></button><button className="avatar">J</button></div></header>
+    <section className="hero"><div><p className="eyebrow"><Sparkles/> A code conversation</p><h1>Point at the part<br/><em>you don&apos;t understand.</em></h1><p className="hero-copy">Paste code on the left. Select a line, point to it, or circle a group. Mould keeps the engineer&apos;s explanation attached to your question.</p></div><div className="analyze-status"><span className={analyzed?'status-dot ready':'status-dot'}/>{analyzed?'Code mapped':'Reading code…'}<button onClick={analyze} disabled={!analyzed}><Play/> Analyze</button></div></section>
     <section className="workspace">
-      <div className="code-pane"><div className="pane-head"><div><span className="pane-label">01 / Source</span><h2>Paste or edit code</h2></div><span className="js-badge">JS</span></div><div className="code-toolbar"><button className={tool==='select'?'tool-active':''} onClick={()=>setTool('select')}><MousePointer2/> Select</button><button className={tool==='point'?'tool-active':''} onClick={()=>setTool('point')}><Highlighter/> Point</button><button className={tool==='draw'?'tool-active':''} onClick={()=>setTool('draw')}><Pencil/> Draw</button><span/><button onClick={addAnnotation}><Plus/> Note line {selectedLine}</button></div><div className={`editor ${tool}`}><div className="line-numbers">{lines.map((_,i)=><button key={i} className={selectedLine===i+1?'line-active':''} onClick={()=>selectLine(i+1)}>{String(i+1).padStart(2,'0')}</button>)}</div><textarea value={code} onChange={e=>setCode(e.target.value)} spellCheck={false} aria-label="Code editor"/></div><div className="code-foot"><span>{lines.length} lines · editable</span><span>{tool==='point'?'Click a line to trace its meaning':tool==='draw'?'Draw directly on the map':'Click line numbers to inspect'}</span></div>{annotations.length>0&&<div className="annotations"><b>Notes on this code</b>{annotations.map((a,i)=><span key={i}><Pencil/>L{a.line} — {a.text}</span>)}</div>}</div>
-      <div className="map-pane"><div className="pane-head"><div><span className="pane-label">02 / Live model</span><h2>What the code is doing</h2></div><span className="map-meta">select · drag · draw</span></div><div ref={canvasRef} className={`map-canvas ${tool}`} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp}>{<svg className="connections" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="M15 37 C23 13, 29 13, 41 27"/><path d="M41 27 C49 42, 53 42, 65 41"/><path d="M66 41 C73 22, 78 22, 88 31"/>{branch&&<path className="branch-line" d="M65 45 C70 65, 80 63, 87 70"/>}{paths.map((p,i)=><polyline key={i} className="draw-line" points={p}/>)}</svg>}{nodes.map(n=><button key={n.id} className={`map-node ${selected===n.id?'node-selected':''}`} style={{left:`${n.x}%`,top:`${n.y}%`}} onClick={()=>{setSelected(n.id); if(tool==='point') setSelectedLine(n.lines[0])}} onPointerDown={e=>{e.stopPropagation(); if(tool==='select') moveNode(n.id,e)}} onPointerMove={e=>{if(tool==='select'&&e.buttons===1) moveNode(n.id,e)}}><span className="node-kind">{n.kind}</span><strong>{n.title}</strong><p>{n.body}</p><span className="node-grip">drag</span></button>)}{branch&&<button className="map-node branch-node" onClick={()=>ask('What if two categories tie?')}><span className="node-kind">WHAT IF</span><strong>tie case</strong><p>Both categories score 40.</p></button>}<div className="map-hint">{tool==='draw'?'Release to keep your mark':'Click a node to connect it to code'}</div></div><div className="map-foot"><button onClick={()=>setBranch(true)}><GitBranch/> Branch a what-if</button><span>{connected.length?`Line ${selectedLine} maps to ${connected.map(n=>n.title).join(', ')}`:'Select a line to see its path'}</span></div></div>
+      <div className="code-pane widget"><div className="pane-head"><div><span className="pane-label">Widget 01 · Source</span><h2>Your code</h2></div><span className="js-badge">JS</span></div><div className="instruction">Start here. Click a line number, or use Point / Circle to ask about a precise part.</div><div className="code-toolbar"><button className={tool==='select'?'tool-active':''} onClick={()=>setTool('select')}><MousePointer2/> Select</button><button className={tool==='point'?'tool-active':''} onClick={()=>setTool('point')}><Highlighter/> Point</button><button className={tool==='circle'?'tool-active':''} onClick={()=>setTool('circle')}><CircleHelp/> Circle</button><span/><button onClick={()=>setNote(note?'':`Review line ${selectedLine}`)}><Plus/> Note</button></div><div className="editor"><div className="line-numbers">{lines.map((_,i)=><button key={i} className={selectedLine===i+1?'line-active':''} onClick={()=>selectLine(i+1)}>{String(i+1).padStart(2,'0')}</button>)}</div><textarea value={code} onChange={e=>setCode(e.target.value)} spellCheck={false} aria-label="Paste or edit code"/></div><div className="code-foot"><span>{lines.length} lines · editable</span><span>{tool==='circle'?'Drag around lines to circle them':tool==='point'?'Click a line to pin a question':'Select a line to inspect it'}</span></div>{note&&<div className="inline-note"><Pencil/> {note}<button onClick={()=>setNote('')} aria-label="Remove note"><X/></button></div>}</div>
+      <div className="explain-pane widget"><div className="pane-head"><div><span className="pane-label">Widget 02 · Engineer&apos;s view</span><h2>Ask about your selection</h2></div><span className="map-meta">line {selectedLine}</span></div><div className="selected-context"><span className="context-line">{String(selectedLine).padStart(2,'0')}</span><div><b>{detail.label}</b><code>{lines[selectedLine-1] || '// choose a line'}</code></div><span className="tether-dot"/></div><div className="explain-body"><span className="plain-label">In plain English</span><p>{detail.explain}</p><div className="decision-strip"><span>Why an engineer cares</span><b>{selectedLine === 9 ? 'This is the decision point.' : 'This line changes what the program knows.'}</b></div></div><div className="thread"><div className="thread-head"><MessageCircle/> Your questions <span>{threads.length}</span></div>{threads.length===0?<div className="empty-thread"><span>Ask anything about line {selectedLine}.</span><small>Try the prompt below. The answer will stay attached to this selection.</small></div>:threads.map(t=><div className="thread-item" key={t.id}><div className="you">You · line {t.lines.join(', ')}</div><b>{t.prompt}</b><p><span className="eng-dot"/> {t.answer}</p></div>)}<div className="question-row"><input value={question} onChange={e=>setQuestion(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.nativeEvent.isComposing&&e.keyCode!==229)ask()}} placeholder="Ask the engineer…" aria-label="Ask the engineer"/><button onClick={()=>ask()} aria-label="Send question"><ArrowRight/></button></div></div></div>
     </section>
-    <section className="insight-row"><div className="insight-card"><div className="insight-kicker"><span className="number">03</span><span>Line {selectedLine} · {activeNode.kind.toLowerCase()}</span></div><h2>{activeNode.title}: why this exists</h2><p>{activeNode.body}</p><div className="line-context"><code>{lines[selectedLine-1]||'// select a line'}</code><span>↳ {activeNode.title} is connected here</span></div></div><div className="ask-card"><div className="ask-head"><CircleHelp/> Ask about line {selectedLine}</div><div className="question-chips"><button onClick={()=>ask('What if two categories tie?')}>What if two categories tie?</button><button onClick={()=>ask('Which line makes the choice?')}>Which line makes the choice?</button><button onClick={()=>ask('What could go wrong here?')}>What could go wrong here?</button></div><div className="ask-input"><input value={question} onChange={e=>setQuestion(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.nativeEvent.isComposing&&e.keyCode!==229)ask(question)}} placeholder="Ask a follow-up…"/><button onClick={()=>ask(question)}><ArrowRight/></button></div>{answer&&<div className="answer"><Check/> {answer}<button onClick={()=>setAnswer('')} aria-label="Clear answer"><X/></button></div>}</div></section>
-    {editingAnnotation&&<div className="note-dialog"><form onSubmit={saveAnnotation}><b>Annotate line {selectedLine}</b><input name="note" autoFocus placeholder="What should you remember or review?"/><div><button type="button" onClick={()=>setEditingAnnotation(false)}>Cancel</button><button className="save-note">Save note</button></div></form></div>}
-    <footer className="footer-note"><span><Code2/> Mould turns code into a surface you can question.</span><span>Hackathon prototype · local session</span></footer>
+    <section className="below"><div className="quick-card"><span className="pane-label">Suggested questions for this line</span><div className="quick-list"><button onClick={()=>ask(detail.question)}>{detail.question}<ArrowRight/></button><button onClick={()=>ask('What could go wrong here?')}>What could go wrong here?<ArrowRight/></button><button onClick={()=>ask('Explain this without code words')}>Explain this without code words<ArrowRight/></button></div></div><div className="map-card"><div className="map-card-head"><span className="pane-label">Live relationship</span><span>updates as you select</span></div><div className="relationship"><span>your line</span><b>→</b><strong>{detail.label}</strong><b>→</b><span>program decision</span></div><p>There are no generic cards here. Every explanation is anchored to the line you selected.</p></div></section>
+    <footer className="footer-note"><span><Code2/> Mould translates engineering decisions into a conversation.</span><span>Hackathon prototype · local session</span></footer>
   </main>
 }
