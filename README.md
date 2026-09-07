@@ -2,6 +2,10 @@
 
 This is a [Next.js](https://nextjs.org) project bootstrapped with [v0](https://v0.app).
 
+## Live Site
+
+[https://mould-eight.vercel.app](https://mould-eight.vercel.app)
+
 ## Built with v0
 
 This repository is linked to a [v0](https://v0.app) project. You can continue developing by visiting the link below -- start new chats to make changes, and v0 will push commits directly to this repo. Every merge to `main` will automatically deploy.
@@ -20,7 +24,7 @@ yarn dev
 pnpm dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the result locally, or visit the live site at [https://mould-eight.vercel.app](https://mould-eight.vercel.app).
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
